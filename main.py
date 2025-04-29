@@ -2,7 +2,7 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 st.set_page_config(layout="wide", page_title="Dashboard Petróleo Brent")
 
@@ -47,6 +47,10 @@ def criar_grafico_geral(df, contextos):
     max_preco = df['preco'].max()
     max_data = df[df['preco'] == max_preco]['data'].iloc[0]
 
+    # Encontra o valor mínimo
+    min_preco = df['preco'].min()
+    min_data = df[df['preco'] == min_preco]['data'].iloc[0]
+
     fig = go.Figure()
 
     # Gráfico de linha original
@@ -82,8 +86,20 @@ def criar_grafico_geral(df, contextos):
         showarrow=True,
         arrowhead=2,
         ax=20,
-        ay=-30
+        ay=-40 # Ajustado para evitar sobreposição
     )
+
+    # Anotação para o menor preço
+    fig.add_annotation(
+        x=min_data,
+        y=min_preco,
+        text=f'Mínimo: {min_preco:.2f} USD',
+        showarrow=True,
+        arrowhead=2,
+        ax=-20, # Ajustado para apontar de outra direção
+        ay=40   # Ajustado para evitar sobreposição
+    )
+
 
     # Atualizando layout
     fig.update_layout(
@@ -174,6 +190,11 @@ def criar_grafico_contexto(df, contexto, dias_extra=30): # Default 30 dias
         st.warning(f"Erro ao calcular variação para {contexto['nome']}: {e}")
         variacao = 0 # Reseta para 0 em caso de erro
 
+    # Calculate the maximum price in the period for y-axis scaling
+    max_preco_periodo = df_periodo['preco'].max() if not df_periodo.empty else 0
+    y_axis_upper_limit = max_preco_periodo * 1.5
+
+
     # Atualizando layout
     fig.update_layout(
         title=f"{contexto['nome']}: {contexto['descricao']} (Variação: {variacao:.2f}%)",
@@ -182,6 +203,8 @@ def criar_grafico_contexto(df, contexto, dias_extra=30): # Default 30 dias
         template="plotly_dark",
         height=400
     )
+
+    fig.update_yaxes(range=[0, y_axis_upper_limit])
 
     return fig
 
@@ -193,7 +216,7 @@ def main():
     st.sidebar.header("Informações")
     # Removido o slider e definido valor fixo de 30 dias
     dias_extra = 30  # 30 dias antes e 30 depois do contexto
-
+    
     # Carrega os dados
     with st.spinner('Carregando dados do petróleo...'):
         df_petroleo = get_dados_petroleo_brent()
@@ -201,15 +224,82 @@ def main():
     if df_petroleo is None or df_petroleo.empty: # Verifica se o df não é None e não está vazio
         st.error("Não foi possível carregar os dados ou os dados estão vazios. Tente novamente mais tarde.")
         return # Interrompe a execução se não houver dados
+        
+    # Adicionando filtro de data
+    st.sidebar.subheader("Filtro de Data")
+    
+    # Obtendo data mínima e máxima do dataframe
+    data_min = df_petroleo['data'].min().date()
+    data_max = df_petroleo['data'].max().date()
+    
+    # Usando chave de sessão para armazenar valores selecionados
+    if 'data_inicio' not in st.session_state:
+        st.session_state.data_inicio = data_min
+    if 'data_fim' not in st.session_state:
+        st.session_state.data_fim = data_max
+    
+    # Função de callback para atualizar valores quando o slider muda
+    def slider_change():
+        st.session_state.data_inicio = st.session_state.slider_range[0]
+        st.session_state.data_fim = st.session_state.slider_range[1]
+    
+    # Função de callback para atualizar o slider quando date_input muda
+    def date_inicio_change():
+        # Garante que data_inicio não seja maior que data_fim
+        if st.session_state.date_inicio > st.session_state.data_fim:
+            st.session_state.date_inicio = st.session_state.data_fim
+        st.session_state.slider_range = (st.session_state.date_inicio, st.session_state.data_fim)
+    
+    def date_fim_change():
+        # Garante que data_fim não seja menor que data_inicio
+        if st.session_state.date_fim < st.session_state.data_inicio:
+            st.session_state.date_fim = st.session_state.data_inicio
+        st.session_state.slider_range = (st.session_state.data_inicio, st.session_state.date_fim)
+    
+    # Slider para ajuste interativo do período
+    st.sidebar.slider(
+        "Selecione o intervalo de datas",
+        min_value=data_min,
+        max_value=data_max,
+        value=(st.session_state.data_inicio, st.session_state.data_fim),
+        format="DD/MM/YYYY",
+        key="slider_range",
+        on_change=slider_change
+    )
+    
+    # Usando date_input em vez de slider para garantir que as datas sejam exibidas corretamente
+    col_date1, col_date2 = st.sidebar.columns(2)
+    with col_date1:
+        data_inicio = st.date_input(
+            "De:", 
+            value=st.session_state.data_inicio, 
+            min_value=data_min, 
+            max_value=data_max,
+            key="date_inicio",
+            on_change=date_inicio_change
+        )
+    with col_date2:
+        data_fim = st.date_input(
+            "Até:", 
+            value=st.session_state.data_fim, 
+            min_value=data_min, 
+            max_value=data_max,
+            key="date_fim",
+            on_change=date_fim_change
+        )
 
-    # Dados estatísticos (só executa se df_petroleo for válido)
+    # Filtrando o dataframe para análises gerais (sem afetar os contextos)
+    df_filtrado = df_petroleo[(df_petroleo['data'].dt.date >= data_inicio) & 
+                             (df_petroleo['data'].dt.date <= data_fim)]
+
+    # Dados estatísticos (usando o dataframe filtrado)
     st.sidebar.subheader("Estatísticas Gerais")
-    st.sidebar.metric("Preço Médio", f"{df_petroleo['preco'].mean():.2f} USD")
-    st.sidebar.metric("Preço Máximo", f"{df_petroleo['preco'].max():.2f} USD")
-    st.sidebar.metric("Preço Mínimo", f"{df_petroleo['preco'].min():.2f} USD")
+    st.sidebar.metric("Preço Médio", f"{df_filtrado['preco'].mean():.2f} USD")
+    st.sidebar.metric("Preço Máximo", f"{df_filtrado['preco'].max():.2f} USD")
+    st.sidebar.metric("Preço Mínimo", f"{df_filtrado['preco'].min():.2f} USD")
     # Verifica se a coluna 'data' existe e não está vazia antes de chamar max()
-    if 'data' in df_petroleo.columns and not df_petroleo['data'].empty:
-        st.sidebar.metric("Última Atualização", f"{df_petroleo['data'].max().strftime('%d/%m/%Y')}")
+    if 'data' in df_filtrado.columns and not df_filtrado['data'].empty:
+        st.sidebar.metric("Última Atualização", f"{df_filtrado['data'].max().strftime('%d/%m/%Y')}")
     else:
         st.sidebar.metric("Última Atualização", "N/A")
 
@@ -233,7 +323,7 @@ def main():
         {
             "nome": "COVID-19",
             "inicio": "2020-03-01",
-            "fim": "2020-05-01",
+            "fim": "2022-03-01",
             "descricao": "Colapso da demanda devido à pandemia",
             "cor": "orange"
         },
@@ -248,7 +338,13 @@ def main():
 
     # Gráfico Geral
     st.header("Visão Geral do Preço do Petróleo Brent")
-    st.plotly_chart(criar_grafico_geral(df_petroleo, contextos), use_container_width=True)
+    fig_geral = criar_grafico_geral(df_filtrado, contextos)
+    # Ajusta o eixo x para exibir apenas o período selecionado
+    fig_geral.update_layout(xaxis=dict(range=[
+        data_inicio.strftime('%Y-%m-%d'),
+        data_fim.strftime('%Y-%m-%d')
+    ]))
+    st.plotly_chart(fig_geral, use_container_width=True)
 
     # Gráficos de cada contexto histórico
     st.header("Análise por Contexto Histórico")
