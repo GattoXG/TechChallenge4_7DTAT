@@ -232,65 +232,32 @@ def main():
     data_min = df_petroleo['data'].min().date()
     data_max = df_petroleo['data'].max().date()
     
-    # Usando chave de sessão para armazenar valores selecionados
+    # Implementação simplificada sem usar callbacks
+    # Inicializar valores de state se necessário
     if 'data_inicio' not in st.session_state:
         st.session_state.data_inicio = data_min
     if 'data_fim' not in st.session_state:
         st.session_state.data_fim = data_max
     
-    # Função de callback para atualizar valores quando o slider muda
-    def slider_change():
-        st.session_state.data_inicio = st.session_state.slider_range[0]
-        st.session_state.data_fim = st.session_state.slider_range[1]
-    
-    # Função de callback para atualizar o slider quando date_input muda
-    def date_inicio_change():
-        # Garante que data_inicio não seja maior que data_fim
-        if st.session_state.date_inicio > st.session_state.data_fim:
-            st.session_state.date_inicio = st.session_state.data_fim
-        st.session_state.slider_range = (st.session_state.date_inicio, st.session_state.data_fim)
-    
-    def date_fim_change():
-        # Garante que data_fim não seja menor que data_inicio
-        if st.session_state.date_fim < st.session_state.data_inicio:
-            st.session_state.date_fim = st.session_state.data_inicio
-        st.session_state.slider_range = (st.session_state.data_inicio, st.session_state.date_fim)
-    
     # Slider para ajuste interativo do período
-    st.sidebar.slider(
+    data_inicio_slider, data_fim_slider = st.sidebar.slider(
         "Selecione o intervalo de datas",
         min_value=data_min,
         max_value=data_max,
-        value=(st.session_state.data_inicio, st.session_state.data_fim),
-        format="DD/MM/YYYY",
-        key="slider_range",
-        on_change=slider_change
+        value=(data_min, data_max),
+        format="DD/MM/YYYY"
     )
     
-    # Usando date_input em vez de slider para garantir que as datas sejam exibidas corretamente
+    # Usando date_input simples
     col_date1, col_date2 = st.sidebar.columns(2)
     with col_date1:
-        data_inicio = st.date_input(
-            "De:", 
-            value=st.session_state.data_inicio, 
-            min_value=data_min, 
-            max_value=data_max,
-            key="date_inicio",
-            on_change=date_inicio_change
-        )
+        data_inicio = st.date_input("De:", data_inicio_slider, min_value=data_min, max_value=data_max)
     with col_date2:
-        data_fim = st.date_input(
-            "Até:", 
-            value=st.session_state.data_fim, 
-            min_value=data_min, 
-            max_value=data_max,
-            key="date_fim",
-            on_change=date_fim_change
-        )
-
-    # Filtrando o dataframe para análises gerais (sem afetar os contextos)
-    df_filtrado = df_petroleo[(df_petroleo['data'].dt.date >= data_inicio) & 
-                             (df_petroleo['data'].dt.date <= data_fim)]
+        data_fim = st.date_input("Até:", data_fim_slider, min_value=data_min, max_value=data_max)
+    
+    # Filtrando o dataframe usando as datas do slider que são sempre atualizadas
+    df_filtrado = df_petroleo[(df_petroleo['data'].dt.date >= data_inicio_slider) & 
+                             (df_petroleo['data'].dt.date <= data_fim_slider)]
 
     # Dados estatísticos (usando o dataframe filtrado)
     st.sidebar.subheader("Estatísticas Gerais")
