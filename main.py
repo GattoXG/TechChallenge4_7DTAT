@@ -2,7 +2,16 @@ import requests
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+import numpy as np
 from datetime import datetime, timedelta
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+import joblib
+import os
+import threading
 
 st.set_page_config(layout="wide", page_title="Dashboard Petróleo Brent")
 
@@ -37,10 +46,20 @@ def get_dados_petroleo_brent():
 
         # Calcula a média móvel de 7 dias
         df['media_movel_7d'] = df['preco'].rolling(window=7).mean()
-        return df
+        df.dropna(subset=['media_movel_7d'], inplace=True) # Garante que não há NaN na média móvel
+
+        # Normaliza os preços entre 0 e 1
+        scaler = MinMaxScaler()
+        df_normalizado = df.copy()
+        df_normalizado.set_index('data', inplace=True)
+        df_normalizado['preco_normalizado'] = scaler.fit_transform(df_normalizado[['preco']])
+        df_normalizado['media_movel_7d_normalizado'] = scaler.fit_transform(df_normalizado[['media_movel_7d']])
+        df_normalizado.drop(columns=['preco', 'media_movel_7d'], inplace=True)
+
+        return df, df_normalizado
     else:
         st.error(f"Erro ao acessar API do IPEA: {response.status_code}")
-        return None
+        return None, None
 
 def criar_grafico_geral(df, contextos):
     # Encontra o valor máximo
@@ -208,6 +227,144 @@ def criar_grafico_contexto(df, contexto, dias_extra=30): # Default 30 dias
 
     return fig
 
+def separar_dados_treino_teste(df, variavel_alvo='preco_normalizado', test_size=0.2, random_state=42):
+    """
+    Separa os dados em conjuntos de treino e teste respeitando a sequência temporal.
+    
+    Parameters:
+    -----------
+    df_normalizado : pandas.DataFrame
+        DataFrame normalizado contendo os dados
+    variavel_alvo : str, default='preco_normalizado'
+        Nome da coluna que será usada como variável alvo
+    test_size : float, default=0.2
+        Proporção dos dados a ser usada como conjunto de teste (0.0 a 1.0)
+    random_state : int, default=42
+        Semente para reprodutibilidade
+    
+    Returns:
+    --------
+    X_train, X_test, y_train, y_test : numpy.ndarray
+        Arrays contendo os conjuntos de treino e teste para features e alvo
+    """
+    # Garante que o dataframe está ordenado pelo índice (que deve ser a data)
+    df = df.sort_index()
+    
+    # Define as features e o alvo
+    features = [col for col in df.columns if col != variavel_alvo]
+    X = df[features].values
+    y = df[variavel_alvo].values
+    
+    # Divide os dados respeitando a sequência temporal
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=test_size, shuffle=False, random_state=random_state
+    )
+    
+    return X_train, X_test, y_train, y_test
+
+def create_sequences(data, window_size):
+    """
+    Cria sequências de dados para uso em modelos de previsão.
+    
+    Parameters:
+    -----------
+    data : numpy.ndarray
+        Array contendo os dados para criar sequências
+    window_size : int
+        Tamanho da janela deslizante para criar as sequências
+    
+    Returns:
+    --------
+    X : numpy.ndarray
+        Array contendo as sequências criadas
+    """
+    X = []
+    for i in range(len(data) - window_size):
+        X.append(data[i:i + window_size])
+    return np.array(X)
+
+def avaliar_modelo(modelo, X_test, y_test, scaler=None):
+    """
+    Avalia o desempenho do modelo usando métricas comuns.
+    
+    Parameters:
+    -----------
+    modelo : sklearn.ensemble.RandomForestRegressor
+        Modelo treinado para avaliar
+    X_test : numpy.ndarray
+        Conjunto de teste (features)
+    y_test : numpy.ndarray
+        Conjunto de teste (valores reais)
+    scaler : sklearn.preprocessing.MinMaxScaler, optional
+        Scaler usado para desnormalizar os valores, se necessário
+    
+    Returns:
+    --------
+    metricas : dict
+        Dicionário contendo as métricas calculadas
+    """
+    from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+    
+    # Faz previsões no conjunto de teste
+    y_pred = modelo.predict(X_test)
+    
+    # Calcula as métricas
+    mae = mean_absolute_error(y_test, y_pred)
+    mse = mean_squared_error(y_test, y_pred)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(y_test, y_pred)
+    
+    # Se um scaler foi fornecido, desnormaliza os valores para mostrar na escala original
+    if scaler is not None:
+        # Converte para o formato esperado pelo scaler
+        y_test_reshaped = y_test.reshape(-1, 1)
+        y_pred_reshaped = y_pred.reshape(-1, 1)
+        
+        # Desnormaliza
+        y_test_original = scaler.inverse_transform(y_test_reshaped).flatten()
+        y_pred_original = scaler.inverse_transform(y_pred_reshaped).flatten()
+        
+        # Recalcula as métricas com os valores desnormalizados
+        mse_original = mean_squared_error(y_test_original, y_pred_original)
+        rmse_original = np.sqrt(mse_original)
+        
+        # Retorna métricas normalizadas e RMSE em escala original (USD)
+        return {
+            'MAE': mae,
+            'MSE': mse,
+            'RMSE': rmse,
+            'R²': r2,
+            'RMSE (USD)': rmse_original
+        }
+    
+    return {
+        'MAE': mae,
+        'MSE': mse,
+        'RMSE': rmse,
+        'R²': r2
+    }
+
+def treinar_modelo(X_train, y_train):
+    """
+    Treina um modelo de Random Forest Regressor.
+    
+    Parameters:
+    -----------
+    X_train : numpy.ndarray
+        Conjunto de dados de treino (features)
+    y_train : numpy.ndarray
+        Conjunto de dados de treino (variável alvo)
+    
+    Returns:
+    --------
+    modelo : sklearn.ensemble.RandomForestRegressor
+        Modelo treinado
+    """
+    modelo = RandomForestRegressor(n_estimators=100, random_state=42)
+    modelo.fit(X_train, y_train)
+    
+    return modelo
+    
 # Principal
 def main():
     st.title("Dashboard de Análise do Preço do Petróleo Brent")
@@ -219,11 +376,13 @@ def main():
     
     # Carrega os dados
     with st.spinner('Carregando dados do petróleo...'):
-        df_petroleo = get_dados_petroleo_brent()
+        df_petroleo, df_modelo = get_dados_petroleo_brent()
 
     if df_petroleo is None or df_petroleo.empty: # Verifica se o df não é None e não está vazio
         st.error("Não foi possível carregar os dados ou os dados estão vazios. Tente novamente mais tarde.")
         return # Interrompe a execução se não houver dados
+    
+    print(df_modelo.head())  # Debug: imprime as primeiras linhas do dataframe
         
     # Adicionando filtro de data
     st.sidebar.subheader("Filtro de Data")
@@ -351,7 +510,346 @@ def main():
 
     # Informações adicionais
     st.markdown("---")
+    
+    # Seção de Previsão do Modelo - XGBoost
+    st.markdown("---")
+    st.header("Previsão de Preço do Petróleo - XGBoost Regressor")
+    # Layout para seleção e visualização XGBoost
+    col_xgb1, col_xgb2 = st.columns([2,1])
+    with col_xgb1:
+        # Seleção de janela
+        janelas = {"7 dias":7, "14 dias":14, "21 dias":21, "28 dias":28}
+        janela_text = st.selectbox("Janela XGBoost:", list(janelas.keys()), index=0, key='xgb_janela')
+        window_xgb = janelas[janela_text]
+        
+        def carregar_xgb(w):
+            pm = f"modelos/xgb_model_{w}d.pkl"
+            ps = f"modelos/xgb_scaler_{w}d.pkl"
+            if os.path.exists(pm) and os.path.exists(ps):
+                return joblib.load(pm), joblib.load(ps)
+            return None, None
+        def treinar_xgb(w):
+            sc = MinMaxScaler()
+            df_t = df_petroleo.copy()
+            df_t['scaled'] = sc.fit_transform(df_t[['preco']])
+            seq = create_sequences(df_t['scaled'].values, w)
+            y = df_t['scaled'].values[w:]
+            Xtr, Xte, ytr, yte = train_test_split(seq, y, test_size=0.2, shuffle=False)
+            mdl = XGBRegressor(n_estimators=100, random_state=42, verbosity=0)
+            mdl.fit(Xtr, ytr)
+            os.makedirs("modelos", exist_ok=True)
+            joblib.dump(mdl, f"modelos/xgb_model_{w}d.pkl")
+            joblib.dump(sc, f"modelos/xgb_scaler_{w}d.pkl")
+            return mdl, sc
+        model_xgb, scaler_xgb = carregar_xgb(window_xgb)
+        if model_xgb is None:
+            with st.spinner(f"Treinando XGBoost {window_xgb} dias..."):
+                model_xgb, scaler_xgb = treinar_xgb(window_xgb)
+            st.success(f"XGBoost {window_xgb} dias pronto.")
+        # background train
+        for w in janelas.values():
+            if w!=window_xgb and not os.path.exists(f"modelos/xgb_model_{w}d.pkl"):
+                threading.Thread(target=treinar_xgb, args=(w,), daemon=True).start()
+        # Previsão XGB 15 dias
+        dias_f = 15
+        tmp = df_petroleo.copy()
+        tmp['scaled'] = scaler_xgb.transform(tmp[['preco']])
+        seq_all = create_sequences(tmp['scaled'].values, window_xgb)
+        inp_x = seq_all[-1].copy()
+        preds_x, dates_x = [], []
+        ld = df_petroleo['data'].iloc[-1]
+        lp = df_petroleo['preco'].iloc[-1]
+        for i in range(dias_f):
+            d2 = ld + timedelta(days=i+1)
+            dates_x.append(d2)
+            p2 = model_xgb.predict(inp_x.reshape(1,-1))[0]
+            r2 = scaler_xgb.inverse_transform([[p2]])[0][0]
+            preds_x.append(r2)
+            inp_x = np.append(inp_x[1:], p2)
+        
+        # Após gerar preds_x e dates_x, ajusta previsão para data atual
+        data_atual = datetime.now().date()
+        days_diff_x = (data_atual - ld.date()).days
+        idx_x = days_diff_x - 1 if days_diff_x > 0 else 0
+        idx_x = max(0, min(idx_x, len(preds_x) - 1))
+        pred_today_x = preds_x[idx_x]
+        label_date_x = data_atual
+
+        # Avaliação XGB
+        _, Xtx, _, ytx = train_test_split(seq_all, tmp['scaled'].values[window_xgb:], test_size=0.2, shuffle=False)
+        metrics_x = avaliar_modelo(model_xgb, Xtx, ytx, scaler_xgb)
+        # Gráfico XGB
+        hist = df_petroleo.copy(); hist['tipo']='Histórico'
+        fut = pd.DataFrame({'data':dates_x,'preco':preds_x,'tipo':'Previsão'})
+        vis_x = pd.concat([hist.tail(50), fut])
+        fig_x = go.Figure()
+        fig_x.add_trace(go.Scatter(x=vis_x[vis_x['tipo']=='Histórico']['data'], y=vis_x[vis_x['tipo']=='Histórico']['preco'], mode='lines', name='Histórico'))
+        fig_x.add_trace(go.Scatter(x=vis_x[vis_x['tipo']=='Previsão']['data'], y=vis_x[vis_x['tipo']=='Previsão']['preco'], mode='lines', name=f'Previsão {dias_f}d'))
+        fig_x.update_layout(title=f'XGBoost Previsão (janela {window_xgb}d)', xaxis_title='Data', yaxis_title='Preço', template='plotly_dark', height=400)
+        st.plotly_chart(fig_x, use_container_width=True)
+    with col_xgb2:
+        st.subheader('Dados Gerais XGBoost')
+        c1, c2 = st.columns(2)
+        # Variação percentual para data atual
+        var_x = ((pred_today_x - lp) / lp) * 100
+        with c1:
+            st.metric('Último preço', f"US$ {lp:.2f}")
+        with c2:
+            st.metric(
+                f"Previsão para {label_date_x.strftime('%d/%m/%Y')}",
+                f"US$ {pred_today_x:.2f}",
+                f"{var_x:.2f}%"
+            )
+        st.subheader('Métricas XGBoost')
+        if metrics_x:
+            m1, m2 = st.columns(2)
+            with m1:
+                st.metric('MAE', f"{metrics_x['MAE']:.4f}")
+                st.metric('MSE', f"{metrics_x['MSE']:.4f}")
+                st.metric('RMSE (USD)', f"US$ {metrics_x['RMSE (USD)']:.2f}")
+            with m2:
+                st.metric('RMSE', f"{metrics_x['RMSE']:.4f}")
+                st.metric('R²', f"{metrics_x['R²']:.4f}")
+    
+    st.markdown("---")
+
+    # Modelos Alternativos agrupados em expander
+    with st.expander("Modelos Alternativos"):
+        # Seção de Previsão do Modelo - Random Forest
+        st.header("Previsão de Preço do Petróleo - Random Forest Regressor")
+        col_prev1, col_prev2 = st.columns([2, 1])
+        
+        with col_prev1:
+            # Seleção da janela de tempo
+            janelas = {"7 dias":7, "14 dias":14, "21 dias":21, "28 dias":28}
+            janela_text = st.selectbox("Janela para previsão:", list(janelas.keys()), index=0)
+            window_size = janelas[janela_text]
+            
+            # Funções para carregamento e treino
+            def carregar(window):
+                path_model = f"modelos/forecast_model_{window}d.pkl"
+                path_scaler = f"modelos/scaler_{window}d.pkl"
+                if os.path.exists(path_model) and os.path.exists(path_scaler):
+                    mdl = joblib.load(path_model)
+                    scl = joblib.load(path_scaler)
+                    return mdl, scl
+                else:
+                    return None, None
+            
+            def treinar(window):
+                scaler = MinMaxScaler()
+                df_t = df_petroleo.copy()
+                df_t['scaled'] = scaler.fit_transform(df_t[['preco']])
+                X = create_sequences(df_t['scaled'].values, window)
+                y = df_t['scaled'].values[window:]
+                Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, shuffle=False)
+                mdl = RandomForestRegressor(n_estimators=100, random_state=42)
+                mdl.fit(Xtr, ytr)
+                os.makedirs("modelos", exist_ok=True)
+                joblib.dump(mdl, f"modelos/forecast_model_{window}d.pkl")
+                joblib.dump(scaler, f"modelos/scaler_{window}d.pkl")
+                return mdl, scaler
+            
+            # Tenta carregar ou treinar o modelo escolhido
+            modelo_rf, scaler_rf = carregar(window_size)
+            if modelo_rf is None:
+                with st.spinner(f"Treinado modelo {window_size} dias..."):
+                    modelo_rf, scaler_rf = treinar(window_size)
+                st.success(f"Modelo de {window_size} dias pronto.")
+            
+            # Inicia background training para outras janelas
+            for w in janelas.values():
+                if w!=window_size:
+                    if not os.path.exists(f"modelos/forecast_model_{w}d.pkl"):
+                        threading.Thread(target=treinar, args=(w,), daemon=True).start()
+            
+            # Previsão (15 dias fixo)
+            dias_previsao=15
+            df_tmp = df_petroleo.copy()
+            df_tmp['scaled']=scaler_rf.transform(df_tmp[['preco']])
+            seq= create_sequences(df_tmp['scaled'].values, window_size)
+            inp = seq[-1].copy()
+            preds=[]; dates=[]
+            last_date=df_petroleo['data'].iloc[-1]
+            last_price=df_petroleo['preco'].iloc[-1]
+            for i in range(dias_previsao):
+                d= last_date + timedelta(days=i+1)
+                dates.append(d)
+                p = modelo_rf.predict(inp.reshape(1,-1))[0]
+                real= scaler_rf.inverse_transform([[p]])[0][0]
+                preds.append(real)
+                inp = np.append(inp[1:], p)
+            
+            # Define previsão correspondente à data atual
+            data_atual = datetime.now().date()
+            # Calcula índice baseado na diferença de dias entre data_atual e último dado
+            days_diff = (data_atual - last_date.date()).days
+            idx = days_diff - 1 if days_diff > 0 else 0
+            idx = max(0, min(idx, len(preds) - 1))
+            pred_today = preds[idx]
+            label_date = data_atual
+
+            # Avaliação
+            Xeval= seq; Yeval=df_tmp['scaled'].values[window_size:]
+            _, Xte, _, yte = train_test_split(Xeval, Yeval, test_size=0.2, shuffle=False)
+            metricas = avaliar_modelo(modelo_rf, Xte, yte, scaler_rf)
+            
+            # Gráfico
+            df_hist = df_petroleo.copy(); df_hist['tipo']='Histórico'
+            df_fut = pd.DataFrame({ 'data':dates, 'preco':preds, 'tipo':'Previsão'})
+            df_vis = pd.concat([df_hist.tail(50), df_fut])
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(x=df_vis[df_vis['tipo']=='Histórico']['data'], y=df_vis[df_vis['tipo']=='Histórico']['preco'], mode='lines', name='Histórico'))
+            fig.add_trace(go.Scatter(x=df_vis[df_vis['tipo']=='Previsão']['data'], y=df_vis[df_vis['tipo']=='Previsão']['preco'], mode='lines', name=f'Previsão {dias_previsao}d'))
+            fig.update_layout(title=f'Previsão (janela {window_size}d)', xaxis_title='Data', yaxis_title='Preço', template='plotly_dark', height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col_prev2:
+            st.subheader("Dados Gerais")
+            col_info1, col_info2 = st.columns(2)
+            # Variação percentual para data atual
+            var_percent = ((pred_today - last_price) / last_price) * 100
+            with col_info1:
+                st.metric("Último preço conhecido", f"US$ {last_price:.2f}")
+            with col_info2:
+                # Exibe previsão para a data atual (delta color padrão)
+                st.metric(
+                    f"Previsão para {label_date.strftime('%d/%m/%Y')}",
+                    f"US$ {pred_today:.2f}",
+                    f"{var_percent:.2f}%"
+                )
+            
+            # Métricas de desempenho
+            st.subheader('Métricas de Modelo')
+            if metricas:
+                col_m1, col_m2 = st.columns(2)
+                with col_m1:
+                    st.metric("MAE", f"{metricas['MAE']:.4f}")
+                    st.metric("MSE", f"{metricas['MSE']:.4f}")
+                    st.metric("RMSE (USD)", f"US$ {metricas['RMSE (USD)']:.2f}")
+                with col_m2:
+                    st.metric("RMSE", f"{metricas['RMSE']:.4f}")
+                    st.metric("R²", f"{metricas['R²']:.4f}")
+        
+        st.markdown("---")
+        
+        # Seção de Previsão do Modelo - LightGBM
+        st.header("Previsão de Preço do Petróleo - LightGBM Regressor")
+        col_lgb1, col_lgb2 = st.columns([2,1])
+        with col_lgb1:
+            # Seleção de janela LightGBM
+            janelas = {"7 dias":7, "14 dias":14, "21 dias":21, "28 dias":28}
+            janela_l = st.selectbox("Janela LightGBM:", list(janelas.keys()), index=0, key='lgbm_janela')
+            window_l = janelas[janela_l]
+            # Funções de carregamento e treino
+            def carregar_lgbm(win):
+                pm = f"modelos/lgbm_model_{win}d.pkl"
+                ps = f"modelos/lgbm_scaler_{win}d.pkl"
+                pf = f"modelos/lgbm_features_{win}d.pkl"
+                if os.path.exists(pm) and os.path.exists(ps):
+                    model = joblib.load(pm)
+                    scaler = joblib.load(ps)
+                    if os.path.exists(pf):
+                        features = joblib.load(pf)
+                    else:
+                        features = [f'f{i}' for i in range(win)]
+                    return model, scaler, features
+                return None, None, None
+            def treinar_lgbm(win):
+                sc = MinMaxScaler()
+                df_t = df_petroleo.copy()
+                df_t['scaled'] = sc.fit_transform(df_t[['preco']])
+                seq = create_sequences(df_t['scaled'].values, win)
+                features = [f'f{i}' for i in range(win)]
+                seq_df = pd.DataFrame(seq, columns=features)
+                y = df_t['scaled'].values[win:]
+                Xtr, Xte, ytr, yte = train_test_split(seq_df, y, test_size=0.2, shuffle=False)
+                mdl = LGBMRegressor(n_estimators=100, random_state=42)
+                mdl.fit(Xtr, ytr)
+                os.makedirs("modelos", exist_ok=True)
+                pm = f"modelos/lgbm_model_{win}d.pkl"
+                ps = f"modelos/lgbm_scaler_{win}d.pkl"
+                pf = f"modelos/lgbm_features_{win}d.pkl"
+                joblib.dump(mdl, pm)
+                joblib.dump(sc, ps)
+                joblib.dump(features, pf)
+                return mdl, sc, features
+            # Carrega ou treina
+            model_l, scaler_l, feat_names = carregar_lgbm(window_l)
+            if model_l is None:
+                with st.spinner(f"Treinando LightGBM {window_l} dias..."):
+                    model_l, scaler_l, feat_names = treinar_lgbm(window_l)
+                st.success(f"LightGBM {window_l} dias pronto.")
+            # Treino em background para outras janelas
+            for w in janelas.values():
+                if w!=window_l and not os.path.exists(f"modelos/lgbm_model_{w}d.pkl"):
+                    threading.Thread(target=treinar_lgbm, args=(w,), daemon=True).start()
+            # Previsão LightGBM (15 dias)
+            dias_l = 15
+            tmp_l = df_petroleo.copy()
+            tmp_l['scaled'] = scaler_l.transform(tmp_l[['preco']])
+            seq_l = create_sequences(tmp_l['scaled'].values, window_l)
+            inp_l = seq_l[-1].copy()
+            preds_l, dates_l = [], []
+            ld_l = df_petroleo['data'].iloc[-1]
+            lp_l = df_petroleo['preco'].iloc[-1]
+            for i in range(dias_l):
+                d_p = ld_l + timedelta(days=i+1)
+                dates_l.append(d_p)
+                df_pred = pd.DataFrame([inp_l], columns=feat_names)
+                p_l = model_l.predict(df_pred)[0]
+                r_l = scaler_l.inverse_transform([[p_l]])[0][0]
+                preds_l.append(r_l)
+                inp_l = np.append(inp_l[1:], p_l)
+            
+            # Ajusta previsão para data atual
+            data_atual_l = datetime.now().date()
+            days_diff_l = (data_atual_l - ld_l.date()).days
+            idx_l = days_diff_l - 1 if days_diff_l > 0 else 0
+            idx_l = max(0, min(idx_l, len(preds_l) - 1))
+            pred_today_l = preds_l[idx_l]
+            label_date_l = data_atual_l
+
+            # Avaliação LightGBM
+            seq_df_all = pd.DataFrame(seq_l, columns=feat_names)
+            _, X_lte_df, _, y_lte = train_test_split(seq_df_all, tmp_l['scaled'].values[window_l:], test_size=0.2, shuffle=False)
+            # Use DataFrame with feature names for prediction to avoid warnings
+            metrics_l = avaliar_modelo(model_l, X_lte_df, y_lte, scaler_l)
+            # Gráfico LightGBM
+            hist_l = df_petroleo.copy(); hist_l['tipo']='Histórico'
+            fut_l = pd.DataFrame({'data':dates_l,'preco':preds_l,'tipo':'Previsão'})
+            vis_l = pd.concat([hist_l.tail(50), fut_l])
+            fig_l = go.Figure()
+            fig_l.add_trace(go.Scatter(x=vis_l[vis_l['tipo']=='Histórico']['data'], y=vis_l[vis_l['tipo']=='Histórico']['preco'], mode='lines', name='Histórico'))
+            fig_l.add_trace(go.Scatter(x=vis_l[vis_l['tipo']=='Previsão']['data'], y=vis_l[vis_l['tipo']=='Previsão']['preco'], mode='lines', name=f'Previsão {dias_l}d'))
+            fig_l.update_layout(title=f'LightGBM Previsão (janela {window_l}d)', xaxis_title='Data', yaxis_title='Preço', template='plotly_dark', height=400)
+            st.plotly_chart(fig_l, use_container_width=True)
+        with col_lgb2:
+            st.subheader('Dados Gerais LightGBM')
+            l1, l2 = st.columns(2)
+            # Variação percentual para data atual
+            var_l = ((pred_today_l - lp_l) / lp_l) * 100
+            with l1:
+                st.metric('Último preço', f"US$ {lp_l:.2f}")
+            with l2:
+                st.metric(
+                    f"Previsão para {label_date_l.strftime('%d/%m/%Y')}",
+                    f"US$ {pred_today_l:.2f}",
+                    f"{var_l:.2f}%"
+                )
+            st.subheader('Métricas LightGBM')
+            if metrics_l:
+                lcol1, lcol2 = st.columns(2)
+                with lcol1:
+                    st.metric('MAE', f"{metrics_l['MAE']:.4f}")
+                    st.metric('MSE', f"{metrics_l['MSE']:.4f}")
+                    st.metric('RMSE (USD)', f"US$ {metrics_l['RMSE (USD)']:.2f}")
+                with lcol2:
+                    st.metric('RMSE', f"{metrics_l['RMSE']:.4f}")
+                    st.metric('R²', f"{metrics_l['R²']:.4f}")
+
     st.caption("Fonte dos dados: IPEA Data - Série Histórica do Preço do Petróleo Brent")
+
 
 if __name__ == "__main__":
     main()
