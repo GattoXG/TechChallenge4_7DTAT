@@ -32,31 +32,65 @@ def setup_sidebar(oil_df):
     min_date = oil_df['date'].min().date()
     max_date = oil_df['date'].max().date()
 
-    if 'start_date' not in st.session_state:
+    if 'start_date' not in st.session_state or st.session_state.start_date is None:
         st.session_state.start_date = min_date
-    if 'end_date' not in st.session_state:
+    if 'end_date' not in st.session_state or st.session_state.end_date is None:
         st.session_state.end_date = max_date
+    if st.session_state.start_date > st.session_state.end_date:
+        st.session_state.start_date = st.session_state.end_date
 
-    start_date_slider, end_date_slider = st.sidebar.slider(
+    def date_input_start_changed():
+        new_start_date = st.session_state.date_input_start_key
+        if new_start_date > st.session_state.end_date:
+            st.session_state.end_date = new_start_date
+        st.session_state.start_date = new_start_date
+
+    def date_input_end_changed():
+        new_end_date = st.session_state.date_input_end_key
+        if new_end_date < st.session_state.start_date:
+            st.session_state.start_date = new_end_date
+        st.session_state.end_date = new_end_date
+
+    def slider_changed():
+        slider_val = st.session_state.slider_key
+        st.session_state.start_date = slider_val[0]
+        st.session_state.end_date = slider_val[1]
+
+    st.sidebar.slider(
         "Selecione o intervalo de datas",
         min_value=min_date,
         max_value=max_date,
         value=(st.session_state.start_date, st.session_state.end_date),
-        format="DD/MM/YYYY"
+        format="DD/MM/YYYY",
+        key="slider_key",
+        on_change=slider_changed
     )
-    st.session_state.start_date = start_date_slider
-    st.session_state.end_date = end_date_slider
 
     date_col1, date_col2 = st.sidebar.columns(2)
     with date_col1:
-        start_date_input = st.date_input("De:", st.session_state.start_date, min_value=min_date, max_value=max_date, key="date_input_start")
+        st.date_input(
+            "De:", 
+            value=st.session_state.start_date, 
+            min_value=min_date, 
+            max_value=max_date, 
+            key="date_input_start_key",
+            on_change=date_input_start_changed
+        )
     with date_col2:
-        end_date_input = st.date_input("Até:", st.session_state.end_date, min_value=min_date, max_value=max_date, key="date_input_end")
+        st.date_input(
+            "Até:", 
+            value=st.session_state.end_date, 
+            min_value=min_date, 
+            max_value=max_date, 
+            key="date_input_end_key",
+            on_change=date_input_end_changed
+        )
+    
+    if st.session_state.start_date > st.session_state.end_date:
+        st.session_state.end_date = st.session_state.start_date
+    if st.session_state.end_date < st.session_state.start_date:
+        st.session_state.start_date = st.session_state.end_date
 
-    if start_date_input != st.session_state.start_date:
-        st.session_state.start_date = start_date_input
-    if end_date_input != st.session_state.end_date:
-        st.session_state.end_date = end_date_input
 
     filtered_df = oil_df[(
         oil_df['date'].dt.date >= st.session_state.start_date
