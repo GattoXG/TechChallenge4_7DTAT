@@ -42,8 +42,17 @@ def evaluate_model(model, X_test, y_test, price_scaler):
     if price_scaler is not None:
         y_test_reshaped = y_test.reshape(-1, 1)
         y_pred_reshaped = y_pred.reshape(-1, 1)
-        y_test_original = price_scaler.inverse_transform(y_test_reshaped).flatten()
-        y_pred_original = price_scaler.inverse_transform(y_pred_reshaped).flatten()
+
+        data_for_inverse_transform_test = y_test_reshaped
+        if hasattr(price_scaler, 'feature_names_in_') and price_scaler.feature_names_in_ is not None and isinstance(price_scaler.feature_names_in_, np.ndarray):
+            data_for_inverse_transform_test = pd.DataFrame(y_test_reshaped, columns=price_scaler.feature_names_in_)
+        y_test_original = price_scaler.inverse_transform(data_for_inverse_transform_test).flatten()
+
+        data_for_inverse_transform_pred = y_pred_reshaped
+        if hasattr(price_scaler, 'feature_names_in_') and price_scaler.feature_names_in_ is not None and isinstance(price_scaler.feature_names_in_, np.ndarray):
+            data_for_inverse_transform_pred = pd.DataFrame(y_pred_reshaped, columns=price_scaler.feature_names_in_)
+        y_pred_original = price_scaler.inverse_transform(data_for_inverse_transform_pred).flatten()
+        
         mse_original = mean_squared_error(y_test_original, y_pred_original)
         rmse_original = np.sqrt(mse_original)
         return {

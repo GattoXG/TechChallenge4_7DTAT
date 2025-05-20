@@ -210,8 +210,13 @@ def display_forecast_section(model_name, load_model_func, train_model_func, oil_
                     predicted_norm_price = model.predict(flat_model_input)[0]
 
                 norm_preds.append(predicted_norm_price)
-                predicted_original_price = price_scaler.inverse_transform([[predicted_norm_price]])[0][0]
+                
+                input_for_price_scaler = [[predicted_norm_price]]
+                if hasattr(price_scaler, 'feature_names_in_') and price_scaler.feature_names_in_ is not None and isinstance(price_scaler.feature_names_in_, np.ndarray):
+                    input_for_price_scaler = pd.DataFrame([[predicted_norm_price]], columns=price_scaler.feature_names_in_)
+                predicted_original_price = price_scaler.inverse_transform(input_for_price_scaler)[0][0]
                 original_preds.append(predicted_original_price)
+                
                 recent_original_prices.append(predicted_original_price)
                 if len(recent_original_prices) > 50: 
                     recent_original_prices.pop(0)
@@ -221,7 +226,11 @@ def display_forecast_section(model_name, load_model_func, train_model_func, oil_
                     last_ma_val = oil_df['moving_average_7d'].iloc[-1] if not oil_df.empty else predicted_original_price
                     next_original_moving_average_7d = last_ma_val
                 
-                next_norm_moving_average_7d = ma_scaler.transform([[next_original_moving_average_7d]])[0][0]
+                input_for_ma_scaler = [[next_original_moving_average_7d]]
+                if hasattr(ma_scaler, 'feature_names_in_') and ma_scaler.feature_names_in_ is not None and isinstance(ma_scaler.feature_names_in_, np.ndarray):
+                    input_for_ma_scaler = pd.DataFrame([[next_original_moving_average_7d]], columns=ma_scaler.feature_names_in_)
+                next_norm_moving_average_7d = ma_scaler.transform(input_for_ma_scaler)[0][0]
+                
                 new_feature_pair = np.array([predicted_norm_price, next_norm_moving_average_7d])
                 current_window_features = np.roll(current_window_features, -1, axis=0)
                 current_window_features[-1, :] = new_feature_pair

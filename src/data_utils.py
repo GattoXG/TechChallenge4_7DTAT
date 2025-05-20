@@ -53,8 +53,8 @@ def get_brent_oil_data():
         ma_scaler = MinMaxScaler()
         df_normalized_features = df.copy()
         df_normalized_features_indexed = df_normalized_features.set_index('date')
-        df_normalized_features_indexed['normalized_price'] = price_scaler.fit_transform(df_normalized_features_indexed[['price']])
-        df_normalized_features_indexed['normalized_moving_average_7d'] = ma_scaler.fit_transform(df_normalized_features_indexed[['moving_average_7d']])
+        df_normalized_features_indexed['normalized_price'] = price_scaler.fit_transform(df_normalized_features_indexed[['price']].values)
+        df_normalized_features_indexed['normalized_moving_average_7d'] = ma_scaler.fit_transform(df_normalized_features_indexed[['moving_average_7d']].values)
         df_model_input = df_normalized_features_indexed[['normalized_price', 'normalized_moving_average_7d']].copy()
         return df, df_model_input, price_scaler, ma_scaler
     else:
